@@ -2,7 +2,10 @@
 FROM node:22-bookworm-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci
+# better-sqlite3 ships prebuilt binaries for linux x64/arm64 and loads them first, so skip its
+# node-gyp fallback (the slim image has no compiler), then prove the binary loads on this platform.
+RUN npm ci --ignore-scripts \
+ && node -e "new (require('better-sqlite3'))(':memory:').prepare('select sqlite_version() v').get()"
 COPY tsconfig.json ./
 COPY src ./src
 RUN npm run build && npm prune --omit=dev
