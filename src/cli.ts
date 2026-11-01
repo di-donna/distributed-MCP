@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 /**
  * Admin CLI that talks to the SQLite database directly (run it on the host that holds the DB,
- * e.g. `docker compose exec hive node dist/cli.js invite --note Bob`).
+ * e.g. `docker compose exec hive hive-admin invite --note Bob`).
  */
 import { loadConfig } from './config.js';
 import { openDb } from './db.js';
+import { inviteShareMessage } from './onboarding.js';
 import { bootstrapAdmin, createApiKey, createInvite, getUserByName, listApiKeys, listInvites, listUsers, revokeApiKey, setUserRole } from './services/members.js';
 import { listProjects } from './services/tasks.js';
 import { kbStats } from './services/kb.js';
@@ -43,7 +44,7 @@ Usage: hive-admin <command> [options]     (DB_PATH env selects the database)
 
   bootstrap                         Create the admin member if missing and print its API key
   invite [--note X] [--role admin] [--uses N] [--expires-hours H]
-                                    Create an invite code for a new teammate
+                                    Create an invite and print a ready-to-send join message
   invites                           List invites
   users                             List members
   role <name> <member|admin>        Change a member's role
@@ -76,9 +77,8 @@ function main(): void {
         expiresInHours: num(flags['expires-hours']) ?? 168,
         note: str(flags.note)
       });
-      console.log(`invite ${invite.id} (${invite.role}, ${invite.max_uses} use(s), expires ${invite.expires_at ? new Date(invite.expires_at * 1000).toISOString() : 'never'})`);
-      console.log(`code: ${code}`);
-      console.log(`Tell the teammate: add ${cfg.publicUrl}/mcp as a custom connector in Claude, sign in, paste the code and enter their name.`);
+      console.log(`invite ${invite.id} (${invite.role}). Send the teammate this message privately:\n`);
+      console.log(inviteShareMessage({ teamName: cfg.teamName, publicUrl: cfg.publicUrl, code, maxUses: invite.max_uses, expiresAt: invite.expires_at }));
       break;
     }
     case 'invites':

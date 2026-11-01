@@ -119,6 +119,17 @@ describe('discovery and auth gate', () => {
     assert.equal((await fetch(`${base}/healthz`)).status, 200);
     const html = await (await fetch(`${base}/`)).text();
     assert.match(html, /Add custom connector/);
+    assert.ok(html.includes(`claude mcp add --transport http hive ${base}/mcp`), 'landing page shows the Claude Code command');
+  });
+});
+
+describe('configuration', () => {
+  test('HIVE_ADMIN_KEY must look like an API key', () => {
+    assert.throws(() => loadConfig({ HIVE_ADMIN_KEY: 'letmein' }), /HIVE_ADMIN_KEY must start with "hv_key_"/);
+    assert.throws(() => loadConfig({ HIVE_ADMIN_KEY: 'hv_key_short' }), /at least 32 characters/);
+    const good = `hv_key_${randomBytes(24).toString('base64url')}`;
+    assert.equal(loadConfig({ HIVE_ADMIN_KEY: ` ${good} ` }).adminKey, good);
+    assert.equal(loadConfig({ HIVE_ADMIN_KEY: '' }).adminKey, undefined);
   });
 });
 
@@ -135,8 +146,12 @@ describe('members, invites and the OAuth flow', () => {
     assert.equal(me.member.name, 'root');
     assert.equal(me.member.role, 'admin');
     assert.equal(me.authenticated_via, 'apikey');
-    const inv = await call<{ invite_code: string }>(client, 'invite_create', { note: 'Dana' });
+    const inv = await call<{ invite_code: string; share_message: string }>(client, 'invite_create', { note: 'Dana' });
     assert.match(inv.invite_code, /^hv_inv_/);
+    assert.ok(inv.share_message.includes(inv.invite_code), 'share_message carries the code');
+    assert.ok(inv.share_message.includes(`${base}/mcp`), 'share_message carries the connector URL');
+    assert.match(inv.share_message, /single use, expires \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC/);
+    assert.match(inv.share_message, /claude mcp add --transport http hive /);
     inviteCode = inv.invite_code;
     await client.close();
   });
@@ -187,6 +202,10 @@ describe('members, invites and the OAuth flow', () => {
     const keyMatch = /(hv_key_[A-Za-z0-9_-]+)/.exec(html);
     assert.ok(keyMatch, 'joined page should show the new API key');
     danaKey = keyMatch![1]!;
+    assert.ok(
+      html.includes(`claude mcp add --transport http hive ${base}/mcp --header &quot;Authorization: Bearer ${danaKey}&quot;`),
+      'joined page shows the Claude Code command with the new key'
+    );
     const hrefMatch = /href="(http:\/\/localhost:9999\/callback[^"]+)"/.exec(html);
     assert.ok(hrefMatch, 'joined page should link to the redirect URI');
     const cb = new URL(hrefMatch![1]!.replace(/&amp;/g, '&'));

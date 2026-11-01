@@ -1,6 +1,0 @@
-{$DOMAIN} {
-	encode gzip
-	reverse_proxy hive:8787 {
-		flush_interval -1
-	}
-}

@@ -1,5 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import { inviteShareMessage } from '../../onboarding.js';
 import { createApiKey, createInvite, listApiKeys, listInvites, listUsers, revokeApiKey, setUserRole } from '../../services/members.js';
 import { defineTool, requireAdmin, type ToolContext } from '../context.js';
 
@@ -10,7 +11,7 @@ export function registerAdminTools(server: McpServer, ctx: ToolContext): void {
     {
       title: 'Create invite',
       description:
-        'ADMIN. Create an invite code a new teammate pastes on the sign-in page (Claude → Connectors → this connector → Sign in) to join the workspace. Send them the code privately. Codes are shown once.',
+        'ADMIN. Create an invite code a new teammate pastes on the sign-in page (Claude → Connectors → this connector → Sign in) to join the workspace. Returns share_message: complete join instructions including the code, to send to the teammate privately (show it to the user verbatim). Codes are shown once.',
       input: {
         note: z.string().optional().describe('Who this is for, e.g. "Bob"'),
         role: z.enum(['member', 'admin']).optional().describe('Default member'),
@@ -27,7 +28,7 @@ export function registerAdminTools(server: McpServer, ctx: ToolContext): void {
         role: invite.role,
         max_uses: invite.max_uses,
         expires_at: invite.expires_at,
-        instructions: `Add the connector URL ${ctx.cfg.publicUrl}/mcp in Claude, choose Sign in, paste this code and enter your name.`
+        share_message: inviteShareMessage({ teamName: ctx.cfg.teamName, publicUrl: ctx.cfg.publicUrl, code, maxUses: invite.max_uses, expiresAt: invite.expires_at })
       };
     }
   );

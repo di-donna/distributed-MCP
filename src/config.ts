@@ -39,7 +39,18 @@ function envBool(env: NodeJS.ProcessEnv, key: string, dflt: boolean): boolean {
   return ['1', 'true', 'yes', 'on'].includes(v.toLowerCase());
 }
 
+/** Same prefix as `API_KEY_PREFIX` in services/members.ts; only tokens with it are treated as API keys. */
+const ADMIN_KEY_PREFIX = 'hv_key_';
+const ADMIN_KEY_MIN_LENGTH = 32;
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
+  const adminKey = env.HIVE_ADMIN_KEY?.trim() || undefined;
+  if (adminKey && (!adminKey.startsWith(ADMIN_KEY_PREFIX) || adminKey.length < ADMIN_KEY_MIN_LENGTH)) {
+    throw new Error(
+      `HIVE_ADMIN_KEY must start with "${ADMIN_KEY_PREFIX}" and be at least ${ADMIN_KEY_MIN_LENGTH} characters long ` +
+        `(e.g. ${ADMIN_KEY_PREFIX} followed by a long random string). Leave it unset to have a key generated and printed on first boot.`
+    );
+  }
   const port = envInt(env, 'PORT', 8787);
   const publicUrl = (env.PUBLIC_URL || `http://localhost:${port}`).replace(/\/+$/, '');
   const cimdRaw = (env.CIMD_ALLOWED_HOSTS || 'claude.ai,claude.com,anthropic.com').trim();
@@ -57,7 +68,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     dbPath: env.DB_PATH || './data/hive.db',
     teamName: env.HIVE_TEAM_NAME || 'Hive',
     adminName: env.HIVE_ADMIN_NAME || 'admin',
-    adminKey: env.HIVE_ADMIN_KEY || undefined,
+    adminKey,
     cimdAllowedHosts,
     trustProxy: envBool(env, 'TRUST_PROXY', false),
     accessTokenTtlSec: envInt(env, 'ACCESS_TOKEN_TTL_SEC', 24 * 3600),

@@ -1,12 +1,14 @@
-# One-command deployment with automatic HTTPS (Caddy obtains certificates from Let's Encrypt).
+# Run a Hive with automatic HTTPS. Needs only this file and a DNS name pointing at the server:
 #
-#   cp .env.example .env   # set DOMAIN (a DNS name pointing at this host) and the other values
+#   echo "DOMAIN=hive.example.com" > .env
 #   docker compose up -d
-#   docker compose logs hive   # first boot prints the admin API key unless HIVE_ADMIN_KEY is set
+#   docker compose logs hive        # the admin API key is printed once on first boot (unless HIVE_ADMIN_KEY is set)
 #
+# Caddy obtains the TLS certificate from Let's Encrypt (ports 80 and 443 must be reachable).
+# To run your own build instead of the published image: docker build -t hive-mcp . && HIVE_IMAGE=hive-mcp docker compose up -d
 services:
   hive:
-    build: .
+    image: ${HIVE_IMAGE:-ghcr.io/di-donna/hive-mcp:latest}
     restart: unless-stopped
     environment:
       PUBLIC_URL: https://${DOMAIN:?set DOMAIN in .env}
@@ -23,13 +25,12 @@ services:
   caddy:
     image: caddy:2
     restart: unless-stopped
+    command: caddy reverse-proxy --from ${DOMAIN:?set DOMAIN in .env} --to hive:8787
     ports:
       - "80:80"
       - "443:443"
-    environment:
-      DOMAIN: ${DOMAIN:?set DOMAIN in .env}
+      - "443:443/udp"
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
       - caddy-config:/config
     depends_on:

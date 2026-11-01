@@ -50,7 +50,7 @@ export function loginRouter(db: DB, cfg: Config, provider: HiveAuthProvider): Ro
         res
           .status(200)
           .type('html')
-          .send(joinedPage({ name: user.name, teamName: cfg.teamName, apiKey: freshKey, continueUrl, clientName: txn.client_name ?? 'Claude' }));
+          .send(joinedPage({ name: user.name, teamName: cfg.teamName, apiKey: freshKey, continueUrl, clientName: txn.client_name ?? 'Claude', mcpUrl: `${cfg.publicUrl}/mcp` }));
       } else {
         res.redirect(302, continueUrl);
       }

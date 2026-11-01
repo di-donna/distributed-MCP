@@ -1,3 +1,4 @@
+import { claudeCodeAddCommand } from '../onboarding.js';
 import { escapeHtml } from '../util.js';
 
 const STYLE = `
@@ -16,7 +17,8 @@ button, a.button { display: inline-block; margin-top: 22px; width: 100%; padding
 .alert.err { background: var(--err-bg); color: var(--err-fg); } .alert.ok { background: var(--ok-bg); color: var(--ok-fg); }
 code, pre { font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
 pre { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 12px; overflow-x: auto; white-space: pre-wrap; word-break: break-all; }
-ul { padding-left: 20px; } li { margin: 4px 0; }
+ul, ol { padding-left: 20px; } li { margin: 4px 0; }
+h2 { font-size: 16px; margin: 20px 0 6px; }
 `;
 
 export function layout(title: string, body: string): string {
@@ -43,7 +45,7 @@ export function loginPage(p: { txn: string; clientName: string; teamName: string
   );
 }
 
-export function joinedPage(p: { name: string; teamName: string; apiKey: string; continueUrl: string; clientName: string }): string {
+export function joinedPage(p: { name: string; teamName: string; apiKey: string; continueUrl: string; clientName: string; mcpUrl: string }): string {
   return layout(
     `Welcome · ${p.teamName}`,
     `<div class="card">
@@ -51,6 +53,8 @@ export function joinedPage(p: { name: string; teamName: string; apiKey: string; 
       <div class="alert ok">You have joined <strong>${escapeHtml(p.teamName)}</strong>.</div>
       <p>This is your personal API key. It is shown <strong>once</strong>; save it in a password manager. Use it to sign in again later, or to connect Claude Code and scripts.</p>
       <pre>${escapeHtml(p.apiKey)}</pre>
+      <p class="muted">To use the workspace from Claude Code on any machine, run:</p>
+      <pre>${escapeHtml(claudeCodeAddCommand(p.mcpUrl, p.apiKey))}</pre>
       <a class="button" href="${escapeHtml(p.continueUrl)}">Continue to ${escapeHtml(p.clientName)}</a>
     </div>`
   );
@@ -67,16 +71,17 @@ export function landingPage(p: { teamName: string; publicUrl: string; version: s
     `<div class="card">
       <h1>${escapeHtml(p.teamName)}</h1>
       <p class="muted">A shared knowledge base, log stream and task queue for a team of Claude agents. Server version ${escapeHtml(p.version)}.</p>
-      <h2 style="font-size:16px;margin:20px 0 6px">Connect from Claude (web, desktop, mobile)</h2>
-      <p>Customize → Connectors → <em>Add custom connector</em>, then paste:</p>
-      <pre>${escapeHtml(mcpUrl)}</pre>
-      <p class="muted">Choose "Sign in now". You will be asked for an invite code (first time) or your personal API key.</p>
-      <h2 style="font-size:16px;margin:20px 0 6px">Connect from Claude Code</h2>
-      <pre>claude mcp add --transport http hive ${escapeHtml(mcpUrl)}
-# then inside Claude Code run /mcp and sign in, or pass a key directly:
-claude mcp add --transport http hive ${escapeHtml(mcpUrl)} \\
-  --header "Authorization: Bearer hv_key_…"</pre>
-      <p class="muted">Need an invite? Ask a workspace admin to run the <code>invite_create</code> tool.</p>
+      <h2>Join from Claude (web, desktop, mobile)</h2>
+      <ol>
+        <li>Get an invite code from a workspace admin (they ask Claude to "create an invite for &lt;your name&gt;").</li>
+        <li>In Claude: Customize → Connectors → <em>Add custom connector</em>, and paste:<pre>${escapeHtml(mcpUrl)}</pre></li>
+        <li>Sign in, then paste the invite code and your name.</li>
+        <li>Save the personal API key you are shown. Next time, sign in with it instead of a code.</li>
+      </ol>
+      <h2>Join from Claude Code</h2>
+      <pre>${escapeHtml(claudeCodeAddCommand(mcpUrl))}
+# then run /mcp inside Claude Code and sign in, or pass your key directly:
+${escapeHtml(claudeCodeAddCommand(mcpUrl, 'hv_key_…'))}</pre>
     </div>`
   );
 }

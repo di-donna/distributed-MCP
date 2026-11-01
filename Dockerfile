@@ -16,7 +16,9 @@ WORKDIR /app
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY package.json ./
-RUN mkdir -p /data && chown -R node:node /data /app
+# `hive-admin` on PATH: docker compose exec hive hive-admin invite --note Bob
+RUN chmod +x dist/cli.js && ln -s /app/dist/cli.js /usr/local/bin/hive-admin \
+ && mkdir -p /data && chown -R node:node /data /app
 USER node
 VOLUME ["/data"]
 EXPOSE 8787
