@@ -1,0 +1,31 @@
+# Fly.io deployment: `fly launch --copy-config --no-deploy`, then
+#   fly volumes create hive_data --size 1
+#   fly secrets set HIVE_ADMIN_KEY=hv_key_<long-random-string>
+#   fly deploy
+# The app URL becomes https://<app>.fly.dev ; set PUBLIC_URL below accordingly.
+app = "hive-mcp"
+primary_region = "iad"
+
+[build]
+
+[env]
+  PUBLIC_URL = "https://hive-mcp.fly.dev"
+  HIVE_TEAM_NAME = "Hive"
+  TRUST_PROXY = "1"
+  DB_PATH = "/data/hive.db"
+  PORT = "8787"
+
+[http_service]
+  internal_port = 8787
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[mounts]]
+  source = "hive_data"
+  destination = "/data"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

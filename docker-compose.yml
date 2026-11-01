@@ -1,0 +1,41 @@
+# One-command deployment with automatic HTTPS (Caddy obtains certificates from Let's Encrypt).
+#
+#   cp .env.example .env   # set DOMAIN (a DNS name pointing at this host) and the other values
+#   docker compose up -d
+#   docker compose logs hive   # first boot prints the admin API key unless HIVE_ADMIN_KEY is set
+#
+services:
+  hive:
+    build: .
+    restart: unless-stopped
+    environment:
+      PUBLIC_URL: https://${DOMAIN:?set DOMAIN in .env}
+      HIVE_TEAM_NAME: ${HIVE_TEAM_NAME:-Hive}
+      HIVE_ADMIN_NAME: ${HIVE_ADMIN_NAME:-admin}
+      HIVE_ADMIN_KEY: ${HIVE_ADMIN_KEY:-}
+      CIMD_ALLOWED_HOSTS: ${CIMD_ALLOWED_HOSTS:-claude.ai,claude.com,anthropic.com}
+      TRUST_PROXY: "1"
+    volumes:
+      - hive-data:/data
+    expose:
+      - "8787"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - hive
+
+volumes:
+  hive-data:
+  caddy-data:
+  caddy-config:
