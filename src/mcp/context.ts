@@ -4,6 +4,7 @@ import { z } from 'zod';
 import type { Config } from '../config.js';
 import type { DB } from '../db.js';
 import type { User } from '../services/members.js';
+import { useSession, type ShareSession } from '../services/sessions.js';
 import { HiveError } from '../util.js';
 
 export interface ToolContext {
@@ -53,6 +54,36 @@ export function defineTool<Shape extends z.ZodRawShape>(
       return fail(err);
     }
   }) as never);
+}
+
+const SESSION_ID_INPUT = z
+  .string()
+  .describe("From session_start in THIS conversation. Only conversations the user explicitly shared with a project have one; never invent one or reuse another conversation's.");
+
+/**
+ * Register a tool that shares content with the team. It requires the session_id of a conversation the user
+ * explicitly shared (session_start); the handler receives the resolved session and must keep writes in its project.
+ */
+export function defineSessionTool<Shape extends z.ZodRawShape>(
+  server: McpServer,
+  ctx: ToolContext,
+  name: string,
+  spec: ToolSpec<Shape>,
+  handler: (args: z.output<z.ZodObject<Shape>>, session: ShareSession) => unknown | Promise<unknown>
+): void {
+  defineTool(
+    server,
+    name,
+    {
+      ...spec,
+      description: `${spec.description} Requires session_id from session_start (the user must have shared this conversation); writes go only to that session's project.`,
+      input: { ...spec.input, session_id: SESSION_ID_INPUT }
+    },
+    (args) => {
+      const { session_id, ...rest } = args as { session_id: string } & Record<string, unknown>;
+      return handler(rest as z.output<z.ZodObject<Shape>>, useSession(ctx.db, ctx.user, session_id, ctx.cfg.sessionIdleHours));
+    }
+  );
 }
 
 export function requireAdmin(ctx: ToolContext): void {

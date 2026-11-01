@@ -11,6 +11,8 @@ export interface Message {
   from_agent_name: string | null;
   to_agent: string | null;
   body: string;
+  /** Share session that posted it (null for pre-0.2 rows). */
+  session_id: string | null;
   ts: number;
 }
 
@@ -22,15 +24,20 @@ export function normalizeChannel(channel?: string | null): string {
   return c;
 }
 
-export function postMessage(db: DB, user: User, agent: Agent | undefined, input: { channel?: string; body: string; toAgent?: string }): Message {
+export function postMessage(
+  db: DB,
+  user: User,
+  agent: Agent | undefined,
+  input: { channel?: string; body: string; toAgent?: string; sessionId?: string }
+): Message {
   assertMaxLength('body', input.body, 16 * 1024);
   if (!input.body.trim()) throw new HiveError('body is required');
   const r = db
     .prepare(
-      `INSERT INTO messages (channel, from_user, from_user_name, from_agent, from_agent_name, to_agent, body, ts)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO messages (channel, from_user, from_user_name, from_agent, from_agent_name, to_agent, body, session_id, ts)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
-    .run(normalizeChannel(input.channel), user.id, user.name, agent?.id ?? null, agent?.name ?? null, input.toAgent ?? null, input.body, now());
+    .run(normalizeChannel(input.channel), user.id, user.name, agent?.id ?? null, agent?.name ?? null, input.toAgent ?? null, input.body, input.sessionId ?? null, now());
   return db.prepare('SELECT * FROM messages WHERE id = ?').get(Number(r.lastInsertRowid)) as Message;
 }
 
@@ -38,7 +45,7 @@ export function readMessages(db: DB, f: { channel?: string; sinceId?: number; fo
   const limit = Math.max(1, Math.min(200, f.limit ?? 50));
   const rows = db
     .prepare(
-      `SELECT id, channel, from_user_name, from_agent, from_agent_name, to_agent, body, ts FROM messages
+      `SELECT id, channel, from_user_name, from_agent, from_agent_name, to_agent, body, session_id, ts FROM messages
        WHERE (? IS NULL OR channel = ?)
          AND (? IS NULL OR id > ?)
          AND (to_agent IS NULL OR to_agent = ?)

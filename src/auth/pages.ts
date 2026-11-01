@@ -82,6 +82,8 @@ export function landingPage(p: { teamName: string; publicUrl: string; version: s
       <pre>${escapeHtml(claudeCodeAddCommand(mcpUrl))}
 # then run /mcp inside Claude Code and sign in, or pass your key directly:
 ${escapeHtml(claudeCodeAddCommand(mcpUrl, 'hv_key_…'))}</pre>
+      <h2>Sharing is opt-in</h2>
+      <p>Connecting shares nothing. To contribute a conversation, tell Claude in it: <em>"share this conversation with project &lt;name&gt;"</em>. Only that conversation can then write, and only into that project; your other conversations stay private.</p>
     </div>`
   );
 }

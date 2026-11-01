@@ -1,6 +1,6 @@
 {
-  "name": "hive-mcp",
-  "version": "0.1.0",
+  "name": "distributed-mcp",
+  "version": "0.2.0",
   "description": "Shared knowledge base, log streams and task queue for teams of Claude agents, served as a remote MCP server (Claude custom connector).",
   "type": "module",
   "main": "dist/index.js",

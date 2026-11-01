@@ -1,5 +1,5 @@
 # Tests every push; builds and smoke-tests the Docker image; publishes it to
-# ghcr.io/<owner>/hive-mcp from main (tag "latest") and from v* tags (semver tags).
+# ghcr.io/<owner>/<repo, lowercased> (ghcr.io/di-donna/distributed-mcp) from main (tag "latest") and from v* tags (semver tags).
 name: CI
 
 on:
@@ -52,14 +52,14 @@ jobs:
         with:
           context: .
           load: true
-          tags: hive-mcp:ci
+          tags: distributed-mcp:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Smoke-test the container
         run: |
           key="hv_key_ci_$(openssl rand -hex 24)"
-          docker run -d --name hive -p 8787:8787 -e HIVE_ADMIN_KEY="$key" hive-mcp:ci
+          docker run -d --name hive -p 8787:8787 -e HIVE_ADMIN_KEY="$key" distributed-mcp:ci
           for i in $(seq 1 30); do curl -fsS http://localhost:8787/healthz && break; sleep 1; done
           echo
           curl -fsS http://localhost:8787/healthz | jq -e '.ok == true'
@@ -69,6 +69,11 @@ jobs:
             -H "authorization: Bearer $key" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
             -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"hive_whoami","arguments":{}}}' \
             | jq -e '.result.content[0].text | fromjson | .member.role == "admin"'
+          # writes are refused unless the conversation was shared (session_start)
+          curl -fsS -X POST http://localhost:8787/mcp \
+            -H "authorization: Bearer $key" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+            -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"log_append","arguments":{"message":"should be refused"}}}' \
+            | jq -e '.error != null or .result.isError == true'
           docker exec hive hive-admin users | grep -q admin
           echo "container smoke test passed"
 
@@ -84,20 +89,24 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Image name (registry names must be lowercase)
+        if: env.PUBLISH == 'true'
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
       - name: Image tags
         if: env.PUBLISH == 'true'
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: ${{ env.IMAGE }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,format=short
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
           labels: |
-            org.opencontainers.image.title=hive-mcp
-            org.opencontainers.image.description=Shared knowledge base, logs and task queue for teams of Claude agents (remote MCP server / Claude custom connector)
+            org.opencontainers.image.title=distributed-mcp
+            org.opencontainers.image.description=Distributed MCP: shared knowledge base, logs and task queue for teams of Claude agents, shared per conversation (remote MCP server / Claude custom connector)
 
       - name: Build and push (linux/amd64, linux/arm64)
         if: env.PUBLISH == 'true'

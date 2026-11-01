@@ -2,30 +2,45 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { resolveAgent } from '../../services/agents.js';
 import { LOG_LEVELS, appendLog, listStreams, searchLogs, tailLogs } from '../../services/logs.js';
-import { postMessage, readMessages } from '../../services/messages.js';
-import { defineTool, type ToolContext } from '../context.js';
+import { normalizeChannel, postMessage, readMessages } from '../../services/messages.js';
+import { sessionProject } from '../../services/sessions.js';
+import { HiveError } from '../../util.js';
+import { defineSessionTool, defineTool, type ToolContext } from '../context.js';
 
 export function registerLogTools(server: McpServer, ctx: ToolContext): void {
-  defineTool(
+  defineSessionTool(
     server,
+    ctx,
     'log_append',
     {
       title: 'Append log',
       description:
-        'Append a line to a shared, append-only log stream (e.g. "experiments", "crawler", "deploy"). Use it for progress, measurements, errors and decisions so teammates can follow and debug your work. Attach structured data when useful.',
+        'Append a line to a shared, append-only log stream (e.g. "experiments", "crawler", "deploy"). Use it for progress, measurements, errors and decisions on the shared project so teammates can follow and debug your work. Attach structured data when useful.',
       input: {
         message: z.string(),
         stream: z.string().optional().describe('Stream name (default "general")'),
         level: z.enum(LOG_LEVELS).optional().describe('debug | info | warn | error (default info)'),
-        project: z.string().optional(),
+        project: z.string().optional().describe("Optional; must be the session's project, which is the default"),
         data: z.unknown().optional().describe('Structured payload (JSON), up to 64 KB'),
         task_id: z.string().optional().describe('Task this line relates to'),
         agent_id: z.string().optional()
       }
     },
-    ({ message, stream, level, project, data, task_id, agent_id }) => {
+    ({ message, stream, level, project, data, task_id, agent_id }, session) => {
       const agent = resolveAgent(ctx.db, ctx.user, agent_id);
-      return appendLog(ctx.db, { message, stream, level, project, data, taskId: task_id, userId: ctx.user.id, userName: ctx.user.name, agentId: agent.id, agentName: agent.name });
+      return appendLog(ctx.db, {
+        message,
+        stream,
+        level,
+        project: sessionProject(session, project),
+        data,
+        taskId: task_id,
+        userId: ctx.user.id,
+        userName: ctx.user.name,
+        agentId: agent.id,
+        agentName: agent.name,
+        sessionId: session.id
+      });
     }
   );
 
@@ -76,21 +91,27 @@ export function registerLogTools(server: McpServer, ctx: ToolContext): void {
     ({ project }) => listStreams(ctx.db, project)
   );
 
-  defineTool(
+  defineSessionTool(
     server,
+    ctx,
     'msg_post',
     {
       title: 'Post message',
       description:
-        'Post a short message to a team channel (default "general") so humans and other agents see it, or send a direct message to one agent with to_agent. Use for coordination: "taking shards 1-4", "API is rate limiting, back off", questions for the coordinator.',
+        "Post a short message to the shared project's channel (the channel is named after the project) so humans and other agents see it, or send a direct message to one agent with to_agent. Use for coordination: \"taking shards 1-4\", \"API is rate limiting, back off\", questions for the coordinator.",
       input: {
         body: z.string(),
-        channel: z.string().optional().describe('Channel name; project names make good channels'),
+        channel: z.string().optional().describe("Optional; must be the session's project name, which is the default"),
         to_agent: z.string().optional().describe('Agent id for a direct message'),
         agent_id: z.string().optional().describe('Which of your agents is speaking')
       }
     },
-    ({ body, channel, to_agent, agent_id }) => postMessage(ctx.db, ctx.user, resolveAgent(ctx.db, ctx.user, agent_id), { body, channel, toAgent: to_agent })
+    ({ body, channel, to_agent, agent_id }, session) => {
+      if (channel !== undefined && channel.trim() !== '' && normalizeChannel(channel) !== session.project) {
+        throw new HiveError(`this conversation is shared with project "${session.project}" only; post in channel "${session.project}"`, 'wrong_project');
+      }
+      return postMessage(ctx.db, ctx.user, resolveAgent(ctx.db, ctx.user, agent_id), { body, channel: session.project, toAgent: to_agent, sessionId: session.id });
+    }
   );
 
   defineTool(

@@ -1,18 +1,19 @@
-# Run a Hive with automatic HTTPS. Needs only this file and a DNS name pointing at the server:
+# Run a Distributed MCP workspace with automatic HTTPS. Needs only this file and a DNS name pointing at the server:
 #
 #   echo "DOMAIN=hive.example.com" > .env
 #   docker compose up -d
 #   docker compose logs hive        # the admin API key is printed once on first boot (unless HIVE_ADMIN_KEY is set)
 #
 # Caddy obtains the TLS certificate from Let's Encrypt (ports 80 and 443 must be reachable).
-# To run your own build instead of the published image: docker build -t hive-mcp . && HIVE_IMAGE=hive-mcp docker compose up -d
+# To run your own build instead of the published image: docker build -t distributed-mcp . && HIVE_IMAGE=distributed-mcp docker compose up -d
 services:
   hive:
-    image: ${HIVE_IMAGE:-ghcr.io/di-donna/hive-mcp:latest}
+    image: ${HIVE_IMAGE:-ghcr.io/di-donna/distributed-mcp:latest}
     restart: unless-stopped
     environment:
       PUBLIC_URL: https://${DOMAIN:?set DOMAIN in .env}
-      HIVE_TEAM_NAME: ${HIVE_TEAM_NAME:-Hive}
+      HIVE_TEAM_NAME: ${HIVE_TEAM_NAME:-Distributed MCP}
+      SESSION_IDLE_HOURS: ${SESSION_IDLE_HOURS:-72}
       HIVE_ADMIN_NAME: ${HIVE_ADMIN_NAME:-admin}
       HIVE_ADMIN_KEY: ${HIVE_ADMIN_KEY:-}
       CIMD_ALLOWED_HOSTS: ${CIMD_ALLOWED_HOSTS:-claude.ai,claude.com,anthropic.com}

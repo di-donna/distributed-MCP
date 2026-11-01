@@ -17,13 +17,14 @@ import {
   releaseTask,
   updateTask
 } from '../../services/tasks.js';
+import { listSessions, sessionProject, type ShareSession } from '../../services/sessions.js';
 import { HiveError, normalizeProject } from '../../util.js';
-import { defineTool, type ToolContext } from '../context.js';
+import { defineSessionTool, defineTool, type ToolContext } from '../context.js';
 
 const taskShape = {
   title: z.string().describe('Short imperative title, e.g. "Benchmark tokenizer on 10k docs"'),
   description: z.string().optional().describe('Everything a worker needs: goal, acceptance criteria, where to write results'),
-  project: z.string().optional().describe('Project name (default "default")'),
+  project: z.string().optional().describe("Optional; must be the session's project, which is the default"),
   priority: z.number().int().min(-100).max(100).optional().describe('Higher is claimed first (default 0)'),
   requires: z.array(z.string()).optional().describe('Capability tags a worker must have, e.g. ["python"]'),
   depends_on: z.array(z.string()).optional().describe('Task ids that must be done first'),
@@ -35,8 +36,18 @@ const taskShape = {
 };
 
 export function registerTaskTools(server: McpServer, ctx: ToolContext): void {
-  defineTool(
+  /** A session may only act on tasks in its own project. */
+  const requireTaskInSession = (taskId: string, session: ShareSession): void => {
+    const task = getTask(ctx.db, taskId);
+    if (!task) throw new HiveError(`task ${taskId} not found`, 'not_found');
+    if (task.project !== session.project) {
+      throw new HiveError(`task ${taskId} belongs to project "${task.project}"; this conversation is shared with "${session.project}" only`, 'wrong_project');
+    }
+  };
+
+  defineSessionTool(
     server,
+    ctx,
     'task_create',
     {
       title: 'Create task',
@@ -44,22 +55,27 @@ export function registerTaskTools(server: McpServer, ctx: ToolContext): void {
         'Add a unit of work to the shared queue so any available agent (yours or a teammate\'s) can claim it. Write the description so a worker with no other context can finish it. Use depends_on to express ordering and requires for capability constraints.',
       input: taskShape
     },
-    (args) => createTask(ctx.db, ctx.user, args)
+    (args, session) => createTask(ctx.db, ctx.user, { ...args, project: sessionProject(session, args.project) }, session.id)
   );
 
-  defineTool(
+  defineSessionTool(
     server,
+    ctx,
     'task_create_batch',
     {
       title: 'Create tasks (batch)',
       description: 'Create many tasks at once, e.g. when splitting a job into shards. Returns the created task ids in order. All-or-nothing.',
       input: { tasks: z.array(z.object(taskShape)).min(1).max(200) }
     },
-    ({ tasks }) => ctx.db.transaction(() => tasks.map((t) => createTask(ctx.db, ctx.user, t)))().map((t) => ({ id: t.id, title: t.title, project: t.project }))
+    ({ tasks }, session) =>
+      ctx.db
+        .transaction(() => tasks.map((t) => createTask(ctx.db, ctx.user, { ...t, project: sessionProject(session, t.project) }, session.id)))()
+        .map((t) => ({ id: t.id, title: t.title, project: t.project }))
   );
 
-  defineTool(
+  defineSessionTool(
     server,
+    ctx,
     'task_claim',
     {
       title: 'Claim next task',
@@ -67,25 +83,27 @@ export function registerTaskTools(server: McpServer, ctx: ToolContext): void {
         'Atomically claim the highest-priority runnable task (dependencies done, capabilities satisfied) so no other agent works on it. Returns the task, or null when nothing is available. You then hold a lease: call task_heartbeat periodically on long work and finish with task_complete or task_fail. Pass task_id to claim a specific task.',
       input: {
         agent_id: z.string().optional().describe('Your agent id from agent_register (defaults to your "default" agent)'),
-        project: z.string().optional().describe('Only claim from this project'),
+        project: z.string().optional().describe("Optional; must be the session's project (claims only ever come from it)"),
         task_id: z.string().optional().describe('Claim this specific task instead of the best available one'),
         capabilities: z.array(z.string()).optional().describe('Override the capabilities registered for the agent'),
         lease_seconds: z.number().int().min(30).max(86400).optional().describe('Override the lease length for this claim')
       }
     },
-    ({ agent_id, project, task_id, capabilities, lease_seconds }) => {
+    ({ agent_id, project, task_id, capabilities, lease_seconds }, session) => {
+      const p = sessionProject(session, project);
       const agent = resolveAgent(ctx.db, ctx.user, agent_id);
-      const task = claimTask(ctx.db, ctx.user, agent, { project: project ? normalizeProject(project) : undefined, taskId: task_id, capabilities, leaseSeconds: lease_seconds });
+      const task = claimTask(ctx.db, ctx.user, agent, { project: p, taskId: task_id, capabilities, leaseSeconds: lease_seconds, sessionId: session.id });
       if (!task) {
-        const open = listTasks(ctx.db, { project, status: 'open', limit: 5 });
+        const open = listTasks(ctx.db, { project: p, status: 'open', limit: 5 });
         return { claimed: null, agent_id: agent.id, hint: open.length ? `${open.length}+ open tasks exist but are blocked or need other capabilities` : 'no open tasks; check project_status or create some' };
       }
       return { claimed: task, agent_id: agent.id, lease_expires_at: task.lease_expires_at };
     }
   );
 
-  defineTool(
+  defineSessionTool(
     server,
+    ctx,
     'task_heartbeat',
     {
       title: 'Heartbeat task',
@@ -98,11 +116,15 @@ export function registerTaskTools(server: McpServer, ctx: ToolContext): void {
       },
       idempotent: true
     },
-    ({ task_id, agent_id, progress, extend_seconds }) => heartbeatTask(ctx.db, ctx.user, resolveAgent(ctx.db, ctx.user, agent_id), task_id, progress, extend_seconds)
+    ({ task_id, agent_id, progress, extend_seconds }, session) => {
+      requireTaskInSession(task_id, session);
+      return heartbeatTask(ctx.db, ctx.user, resolveAgent(ctx.db, ctx.user, agent_id), task_id, progress, extend_seconds);
+    }
   );
 
-  defineTool(
+  defineSessionTool(
     server,
+    ctx,
     'task_complete',
     {
       title: 'Complete task',
@@ -118,12 +140,22 @@ export function registerTaskTools(server: McpServer, ctx: ToolContext): void {
         force: z.boolean().optional().describe('Admins only: complete a task held by someone else')
       }
     },
-    ({ task_id, result, agent_id, kb_path, kb_title, kb_tags, force }) =>
-      completeTask(ctx.db, ctx.user, resolveAgent(ctx.db, ctx.user, agent_id), task_id, { result, kbPath: kb_path, kbTitle: kb_title, kbTags: kb_tags, force }, ctx.cfg.maxDocBytes)
+    ({ task_id, result, agent_id, kb_path, kb_title, kb_tags, force }, session) => {
+      requireTaskInSession(task_id, session);
+      return completeTask(
+        ctx.db,
+        ctx.user,
+        resolveAgent(ctx.db, ctx.user, agent_id),
+        task_id,
+        { result, kbPath: kb_path, kbTitle: kb_title, kbTags: kb_tags, force, sessionId: session.id },
+        ctx.cfg.maxDocBytes
+      );
+    }
   );
 
-  defineTool(
+  defineSessionTool(
     server,
+    ctx,
     'task_fail',
     {
       title: 'Fail task',
@@ -136,22 +168,30 @@ export function registerTaskTools(server: McpServer, ctx: ToolContext): void {
         force: z.boolean().optional().describe('Admins only: fail a task held by someone else')
       }
     },
-    ({ task_id, error, retry, agent_id, force }) => failTask(ctx.db, ctx.user, resolveAgent(ctx.db, ctx.user, agent_id), task_id, error, retry ?? true, force ?? false)
+    ({ task_id, error, retry, agent_id, force }, session) => {
+      requireTaskInSession(task_id, session);
+      return failTask(ctx.db, ctx.user, resolveAgent(ctx.db, ctx.user, agent_id), task_id, error, retry ?? true, force ?? false, session.id);
+    }
   );
 
-  defineTool(
+  defineSessionTool(
     server,
+    ctx,
     'task_release',
     {
       title: 'Release task',
       description: 'Give a claimed task back to the pool without counting an attempt (e.g. you picked it up but cannot do it). Add a note for the next worker.',
       input: { task_id: z.string(), agent_id: z.string().optional(), note: z.string().optional() }
     },
-    ({ task_id, agent_id, note }) => releaseTask(ctx.db, ctx.user, resolveAgent(ctx.db, ctx.user, agent_id), task_id, note)
+    ({ task_id, agent_id, note }, session) => {
+      requireTaskInSession(task_id, session);
+      return releaseTask(ctx.db, ctx.user, resolveAgent(ctx.db, ctx.user, agent_id), task_id, note, session.id);
+    }
   );
 
-  defineTool(
+  defineSessionTool(
     server,
+    ctx,
     'task_cancel',
     {
       title: 'Cancel task',
@@ -159,11 +199,15 @@ export function registerTaskTools(server: McpServer, ctx: ToolContext): void {
       input: { task_id: z.string(), reason: z.string().optional() },
       destructive: true
     },
-    ({ task_id, reason }) => cancelTask(ctx.db, ctx.user, task_id, reason)
+    ({ task_id, reason }, session) => {
+      requireTaskInSession(task_id, session);
+      return cancelTask(ctx.db, ctx.user, task_id, reason, session.id);
+    }
   );
 
-  defineTool(
+  defineSessionTool(
     server,
+    ctx,
     'task_update',
     {
       title: 'Update task',
@@ -180,7 +224,10 @@ export function registerTaskTools(server: McpServer, ctx: ToolContext): void {
       },
       idempotent: true
     },
-    ({ task_id, ...patch }) => updateTask(ctx.db, ctx.user, task_id, patch)
+    ({ task_id, ...patch }, session) => {
+      requireTaskInSession(task_id, session);
+      return updateTask(ctx.db, ctx.user, task_id, patch);
+    }
   );
 
   defineTool(
@@ -226,7 +273,7 @@ export function registerTaskTools(server: McpServer, ctx: ToolContext): void {
     {
       title: 'Project status',
       description:
-        'Dashboard for one project (or all projects when omitted): task counts by status, who is working on what, recent findings, and the latest task log lines. Coordinators should poll this to decide what to do next.',
+        'Dashboard for one project (or all projects when omitted): task counts by status, who is working on what, which conversations are shared into it, recent findings, and the latest task log lines. Coordinators should poll this to decide what to do next.',
       input: { project: z.string().optional() },
       readOnly: true,
       idempotent: true
@@ -246,6 +293,13 @@ export function registerTaskTools(server: McpServer, ctx: ToolContext): void {
         in_progress: tasks.filter((t) => t.status === 'claimed').map((t) => ({ id: t.id, title: t.title, held_by: t.claimed_by_name, progress: t.progress, lease_expires_at: t.lease_expires_at })),
         next_up: tasks.filter((t) => t.status === 'open' && !t.blocked).slice(0, 10).map((t) => ({ id: t.id, title: t.title, priority: t.priority, requires: t.requires })),
         failed: tasks.filter((t) => t.status === 'failed').map((t) => ({ id: t.id, title: t.title, error: t.error })),
+        active_sessions: listSessions(ctx.db, ctx.user, { project: p, all: true, activeOnly: true, limit: 20 }, ctx.cfg.sessionIdleHours).map((s) => ({
+          member: s.user_name,
+          title: s.title,
+          started_at: s.created_at,
+          last_used_at: s.last_used_at,
+          contributions: s.contributions
+        })),
         recent_findings: listDocs(ctx.db, { kind: 'finding', project: p, limit: 5 }).map((d) => ({ path: d.path, title: d.title, by: d.updated_by_name, at: d.updated_at })),
         recent_results: listDocs(ctx.db, { kind: 'result', project: p, limit: 5 }).map((d) => ({ path: d.path, title: d.title, by: d.updated_by_name, at: d.updated_at })),
         recent_task_log: tailLogs(ctx.db, { project: p, stream: 'tasks', limit: 15 }).map((l) => ({ ts: l.ts, level: l.level, message: l.message }))

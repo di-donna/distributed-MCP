@@ -2,7 +2,7 @@
 
 /** The `claude mcp add` command for this workspace, optionally with a personal API key baked in. */
 export function claudeCodeAddCommand(mcpUrl: string, apiKey?: string): string {
-  const base = `claude mcp add --transport http hive ${mcpUrl}`;
+  const base = `claude mcp add --transport http distributed-mcp ${mcpUrl}`;
   return apiKey ? `${base} --header "Authorization: Bearer ${apiKey}"` : base;
 }
 
@@ -30,6 +30,9 @@ export function inviteShareMessage(p: { teamName: string; publicUrl: string; cod
     'Claude Code:',
     `  ${claudeCodeAddCommand(mcpUrl)}`,
     '  then run /mcp inside Claude Code and sign in with the invite code',
+    '',
+    'Nothing is shared automatically. To contribute a conversation, tell Claude in it:',
+    '  "share this conversation with project <name>". Your other conversations stay private.',
     '',
     `Workspace page: ${p.publicUrl}/`
   ].join('\n');

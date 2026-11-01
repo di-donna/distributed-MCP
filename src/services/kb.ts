@@ -12,6 +12,7 @@ import {
   randomId
 } from '../util.js';
 import type { User } from './members.js';
+import { SESSION_META_KEY } from './sessions.js';
 
 export interface Doc {
   id: string;
@@ -107,6 +108,8 @@ export interface PutDocInput {
   ifAbsent?: boolean;
   /** Optimistic concurrency: fail if the current version differs. */
   expectedVersion?: number;
+  /** Share session doing the write: recorded in meta, and an existing doc must already be in `project`. */
+  sessionId?: string;
 }
 
 export function putDoc(db: DB, user: User, input: PutDocInput, maxDocBytes: number): Doc {
@@ -118,12 +121,15 @@ export function putDoc(db: DB, user: User, input: PutDocInput, maxDocBytes: numb
   const kind = normalizeKind(input.kind);
   const tags = normalizeTags(input.tags);
   const project = normalizeProject(input.project);
-  const meta = jsonForStorage('meta', input.meta ?? {}, 16 * 1024);
+  const meta = jsonForStorage('meta', input.sessionId ? { ...input.meta, [SESSION_META_KEY]: input.sessionId } : (input.meta ?? {}), 16 * 1024);
   const ts = now();
 
   return db.transaction(() => {
     const existing = db.prepare('SELECT * FROM kb_docs WHERE path = ?').get(path) as DocRow | undefined;
     if (existing) {
+      if (input.sessionId && existing.project !== project) {
+        throw new HiveError(`document ${path} belongs to project "${existing.project}"; this conversation is shared with "${project}" only`, 'wrong_project');
+      }
       if (input.ifAbsent) throw new HiveError(`document ${path} already exists (version ${existing.version})`, 'conflict');
       if (input.expectedVersion !== undefined && input.expectedVersion !== existing.version) {
         throw new HiveError(`version conflict: ${path} is at version ${existing.version}, you expected ${input.expectedVersion}`, 'conflict');
@@ -245,9 +251,12 @@ export function searchDocs(db: DB, query: string, f: { kind?: string; project?: 
   return rows.map((r) => ({ ...r, tags: parseJson<string[]>(r.tags, []), score: Math.round(-r.score * 1000) / 1000 }));
 }
 
-export function deleteDoc(db: DB, user: User, path: string): Doc {
+export function deleteDoc(db: DB, user: User, path: string, project?: string): Doc {
   const doc = getDoc(db, { path }, false);
   if (!doc) throw new HiveError(`document ${path} not found`, 'not_found');
+  if (project !== undefined && doc.project !== project) {
+    throw new HiveError(`document ${path} belongs to project "${doc.project}"; this conversation is shared with "${project}" only`, 'wrong_project');
+  }
   const row = db.prepare('SELECT created_by FROM kb_docs WHERE id = ?').get(doc.id) as { created_by: string | null };
   if (user.role !== 'admin' && row.created_by !== user.id) {
     throw new HiveError('only the author or an admin can delete a document', 'forbidden');

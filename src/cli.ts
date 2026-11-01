@@ -38,7 +38,7 @@ function parseArgs(argv: string[]): Args {
   return { cmd, flags, rest };
 }
 
-const HELP = `hive-admin — manage the Hive MCP workspace database
+const HELP = `hive-admin — manage the Distributed MCP workspace database
 
 Usage: hive-admin <command> [options]     (DB_PATH env selects the database)
 

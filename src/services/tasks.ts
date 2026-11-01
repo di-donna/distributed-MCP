@@ -37,6 +37,8 @@ export interface Task {
   created_at: number;
   updated_at: number;
   completed_at: number | null;
+  /** Share session that created the task (null for pre-0.2 rows). */
+  session_id: string | null;
 }
 
 interface TaskRow extends Omit<Task, 'inputs' | 'requires' | 'depends_on' | 'tags' | 'blocked'> {
@@ -107,25 +109,28 @@ export interface CreateTaskInput {
   parent_id?: string;
 }
 
-export function createTask(db: DB, user: User, input: CreateTaskInput): Task {
+/** Throw unless the referenced task exists and lives in `project`. */
+function requireTaskInProject(db: DB, taskId: string, project: string, what: string): void {
+  const row = db.prepare('SELECT project FROM tasks WHERE id = ?').get(taskId) as { project: string } | undefined;
+  if (!row) throw new HiveError(`${what} ${taskId} does not exist`, 'not_found');
+  if (row.project !== project) throw new HiveError(`${what} ${taskId} belongs to project "${row.project}", not "${project}"`, 'wrong_project');
+}
+
+export function createTask(db: DB, user: User, input: CreateTaskInput, sessionId?: string): Task {
   const title = input.title.trim();
   if (!title) throw new HiveError('title is required');
   assertMaxLength('title', title, 200);
   assertMaxLength('description', input.description, 32 * 1024);
   const project = normalizeProject(input.project);
   const dependsOn = [...new Set((input.depends_on ?? []).map((d) => d.trim()).filter(Boolean))];
-  for (const dep of dependsOn) {
-    if (!db.prepare('SELECT 1 FROM tasks WHERE id = ?').get(dep)) throw new HiveError(`depends_on task ${dep} does not exist`, 'not_found');
-  }
-  if (input.parent_id && !db.prepare('SELECT 1 FROM tasks WHERE id = ?').get(input.parent_id)) {
-    throw new HiveError(`parent task ${input.parent_id} does not exist`, 'not_found');
-  }
+  for (const dep of dependsOn) requireTaskInProject(db, dep, project, 'depends_on task');
+  if (input.parent_id) requireTaskInProject(db, input.parent_id, project, 'parent task');
   const ts = now();
   const id = randomId('task', 8);
   db.prepare(
     `INSERT INTO tasks (id, project, parent_id, title, description, inputs, priority, status, requires, depends_on, tags,
-       created_by, created_by_name, lease_seconds, max_attempts, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       created_by, created_by_name, lease_seconds, max_attempts, created_at, updated_at, session_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     id,
     project,
@@ -142,7 +147,8 @@ export function createTask(db: DB, user: User, input: CreateTaskInput): Task {
     clampInt(input.lease_seconds, 30, 24 * 3600, 900),
     clampInt(input.max_attempts, 1, 10, 3),
     ts,
-    ts
+    ts,
+    sessionId ?? null
   );
   return getTask(db, id)!;
 }
@@ -160,6 +166,7 @@ export interface ClaimInput {
   taskId?: string;
   capabilities?: string[];
   leaseSeconds?: number;
+  sessionId?: string;
 }
 
 /** Atomically claim the best available task for an agent. Returns undefined when nothing is runnable. */
@@ -183,6 +190,9 @@ export function claimTask(db: DB, user: User, agent: Agent, input: ClaimInput): 
       if (input.taskId) {
         const t = getTask(db, input.taskId);
         if (!t) throw new HiveError(`task ${input.taskId} not found`, 'not_found');
+        if (input.project && t.project !== input.project) {
+          throw new HiveError(`task ${input.taskId} belongs to project "${t.project}"; this conversation is shared with "${input.project}" only`, 'wrong_project');
+        }
         if (t.status !== 'open') throw new HiveError(`task ${input.taskId} is ${t.status}${t.claimed_by_name ? ` by ${t.claimed_by_name}` : ''}`, 'conflict');
         if (t.blocked) throw new HiveError(`task ${input.taskId} is waiting on dependencies: ${t.depends_on.join(', ')}`, 'conflict');
         throw new HiveError(`task ${input.taskId} requires capabilities [${t.requires.join(', ')}]; this agent has [${caps.join(', ')}]`, 'conflict');
@@ -205,7 +215,8 @@ export function claimTask(db: DB, user: User, agent: Agent, input: ClaimInput): 
       userName: user.name,
       agentId: agent.id,
       agentName: agent.name,
-      taskId: candidate.id
+      taskId: candidate.id,
+      sessionId: input.sessionId
     });
     return getTask(db, candidate.id);
   })();
@@ -236,6 +247,7 @@ export interface CompleteInput {
   kbTitle?: string;
   kbTags?: string[];
   force?: boolean;
+  sessionId?: string;
 }
 
 export function completeTask(db: DB, user: User, agent: Agent, taskId: string, input: CompleteInput, maxDocBytes: number): Task {
@@ -254,7 +266,8 @@ export function completeTask(db: DB, user: User, agent: Agent, taskId: string, i
           kind: 'result',
           project: task.project,
           tags: [...(input.kbTags ?? []), ...task.tags],
-          meta: { task_id: task.id, agent: agent.name }
+          meta: { task_id: task.id, agent: agent.name },
+          sessionId: input.sessionId
         },
         maxDocBytes
       );
@@ -272,13 +285,14 @@ export function completeTask(db: DB, user: User, agent: Agent, taskId: string, i
       userName: user.name,
       agentId: agent.id,
       agentName: agent.name,
-      taskId: task.id
+      taskId: task.id,
+      sessionId: input.sessionId
     });
     return getTask(db, taskId)!;
   })();
 }
 
-export function failTask(db: DB, user: User, agent: Agent, taskId: string, error: string, retry: boolean, force = false): Task {
+export function failTask(db: DB, user: User, agent: Agent, taskId: string, error: string, retry: boolean, force = false, sessionId?: string): Task {
   assertMaxLength('error', error, 16 * 1024);
   return db.transaction(() => {
     const task = requireHeldTask(db, user, agent, taskId, force);
@@ -297,13 +311,14 @@ export function failTask(db: DB, user: User, agent: Agent, taskId: string, error
       userName: user.name,
       agentId: agent.id,
       agentName: agent.name,
-      taskId: task.id
+      taskId: task.id,
+      sessionId
     });
     return getTask(db, taskId)!;
   })();
 }
 
-export function releaseTask(db: DB, user: User, agent: Agent, taskId: string, note?: string): Task {
+export function releaseTask(db: DB, user: User, agent: Agent, taskId: string, note?: string, sessionId?: string): Task {
   const task = requireHeldTask(db, user, agent, taskId, user.role === 'admin');
   const ts = now();
   db.prepare(
@@ -318,12 +333,13 @@ export function releaseTask(db: DB, user: User, agent: Agent, taskId: string, no
     userName: user.name,
     agentId: agent.id,
     agentName: agent.name,
-    taskId: task.id
+    taskId: task.id,
+    sessionId
   });
   return getTask(db, taskId)!;
 }
 
-export function cancelTask(db: DB, user: User, taskId: string, reason?: string): Task {
+export function cancelTask(db: DB, user: User, taskId: string, reason?: string, sessionId?: string): Task {
   const task = getTask(db, taskId);
   if (!task) throw new HiveError(`task ${taskId} not found`, 'not_found');
   if (task.status === 'done' || task.status === 'cancelled') throw new HiveError(`task ${taskId} is already ${task.status}`, 'conflict');
@@ -333,7 +349,7 @@ export function cancelTask(db: DB, user: User, taskId: string, reason?: string):
   db.prepare(
     `UPDATE tasks SET status = 'cancelled', error = ?, claimed_by = NULL, claimed_by_name = NULL, lease_expires_at = NULL, completed_at = ?, updated_at = ? WHERE id = ?`
   ).run(reason ?? 'cancelled', ts, ts, taskId);
-  appendLog(db, { project: task.project, stream: 'tasks', message: `cancelled task ${task.id}${reason ? `: ${reason}` : ''}`, userId: user.id, userName: user.name, taskId: task.id });
+  appendLog(db, { project: task.project, stream: 'tasks', message: `cancelled task ${task.id}${reason ? `: ${reason}` : ''}`, userId: user.id, userName: user.name, taskId: task.id, sessionId });
   return getTask(db, taskId)!;
 }
 
@@ -350,7 +366,7 @@ export function updateTask(
   if (dependsOn) {
     for (const dep of dependsOn) {
       if (dep === taskId) throw new HiveError('a task cannot depend on itself');
-      if (!db.prepare('SELECT 1 FROM tasks WHERE id = ?').get(dep)) throw new HiveError(`depends_on task ${dep} does not exist`, 'not_found');
+      requireTaskInProject(db, dep, task.project, 'depends_on task');
     }
   }
   db.prepare(

@@ -8,7 +8,7 @@ let cfg: Config;
 try {
   cfg = loadConfig();
 } catch (err) {
-  console.error(`hive-mcp: configuration error: ${err instanceof Error ? err.message : err}`);
+  console.error(`distributed-mcp: configuration error: ${err instanceof Error ? err.message : err}`);
   process.exit(1);
 }
 const isLocalUrl = /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(cfg.publicUrl);
@@ -17,7 +17,7 @@ const boot = bootstrapAdmin(db, cfg.adminName, cfg.adminKey);
 const { app, provider, mcpUrl } = createApp(cfg, db);
 
 const server = app.listen(cfg.port, cfg.host, () => {
-  console.log(`hive-mcp ${VERSION} listening on http://${cfg.host}:${cfg.port}`);
+  console.log(`distributed-mcp ${VERSION} listening on http://${cfg.host}:${cfg.port}`);
   console.log(`  workspace : ${cfg.teamName}`);
   console.log(`  public URL: ${cfg.publicUrl}`);
   console.log(`  MCP URL   : ${mcpUrl}`);

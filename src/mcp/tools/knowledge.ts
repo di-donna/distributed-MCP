@@ -1,8 +1,9 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { deleteDoc, docHistory, getDoc, getDocVersion, listDocs, putDoc, searchDocs } from '../../services/kb.js';
+import { sessionProject } from '../../services/sessions.js';
 import { HiveError, slugify } from '../../util.js';
-import { defineTool, type ToolContext } from '../context.js';
+import { defineSessionTool, defineTool, type ToolContext } from '../context.js';
 
 const KINDS_HELP = 'Common kinds: doc (default), finding, result, note, decision, spec, resource (a link/reference), runbook.';
 
@@ -13,7 +14,7 @@ export function registerKnowledgeTools(server: McpServer, ctx: ToolContext): voi
     {
       title: 'Search knowledge base',
       description:
-        "Full-text search across everything the team has written to the shared knowledge base (docs, findings, task results, notes). ALWAYS search here before starting research or a task so you build on teammates' work instead of repeating it. Returns ranked hits with snippets; use kb_get to read a full document.",
+        "Full-text search across everything the team has written to the shared knowledge base (docs, findings, task results, notes). Use it when the user asks, or in a conversation they shared with a project, to build on teammates' work instead of repeating it. Returns ranked hits with snippets; use kb_get to read a full document.",
       input: {
         query: z.string().describe('Keywords (AND-ed, prefix matched). Example: "rate limit retry"'),
         kind: z.string().optional().describe(`Restrict to one kind. ${KINDS_HELP}`),
@@ -53,8 +54,9 @@ export function registerKnowledgeTools(server: McpServer, ctx: ToolContext): voi
     }
   );
 
-  defineTool(
+  defineSessionTool(
     server,
+    ctx,
     'kb_put',
     {
       title: 'Write document',
@@ -66,15 +68,20 @@ export function registerKnowledgeTools(server: McpServer, ctx: ToolContext): voi
         title: z.string().optional().describe('Human title; defaults to the file name'),
         kind: z.string().optional().describe(KINDS_HELP),
         tags: z.array(z.string()).optional().describe('Tags for filtering, e.g. ["api","limits"]'),
-        project: z.string().optional().describe('Project this belongs to (default "default")'),
+        project: z.string().optional().describe("Optional; must be the session's project, which is the default"),
         meta: z.record(z.string(), z.unknown()).optional().describe('Small structured metadata (source URLs, dates, confidence…)'),
         if_absent: z.boolean().optional().describe('Only create; fail if the path already exists'),
         expected_version: z.number().int().positive().optional().describe('Fail if the current version is not this (optimistic locking)')
       },
       idempotent: true
     },
-    ({ path, content, title, kind, tags, project, meta, if_absent, expected_version }) => {
-      const doc = putDoc(ctx.db, ctx.user, { path, content, title, kind, tags, project, meta, ifAbsent: if_absent, expectedVersion: expected_version }, ctx.cfg.maxDocBytes);
+    ({ path, content, title, kind, tags, project, meta, if_absent, expected_version }, session) => {
+      const doc = putDoc(
+        ctx.db,
+        ctx.user,
+        { path, content, title, kind, tags, project: sessionProject(session, project), meta, ifAbsent: if_absent, expectedVersion: expected_version, sessionId: session.id },
+        ctx.cfg.maxDocBytes
+      );
       const { content: _c, ...summary } = doc;
       return { saved: true, ...summary, bytes: Buffer.byteLength(content) };
     }
@@ -117,8 +124,9 @@ export function registerKnowledgeTools(server: McpServer, ctx: ToolContext): voi
     }
   );
 
-  defineTool(
+  defineSessionTool(
     server,
+    ctx,
     'kb_delete',
     {
       title: 'Delete document',
@@ -126,28 +134,29 @@ export function registerKnowledgeTools(server: McpServer, ctx: ToolContext): voi
       input: { path: z.string() },
       destructive: true
     },
-    ({ path }) => ({ deleted: deleteDoc(ctx.db, ctx.user, path).path })
+    ({ path }, session) => ({ deleted: deleteDoc(ctx.db, ctx.user, path, session.project).path })
   );
 
-  defineTool(
+  defineSessionTool(
     server,
+    ctx,
     'finding_post',
     {
       title: 'Post finding',
       description:
-        'Record a discrete finding, insight, or conclusion for the team: what you found, the evidence, and your confidence. Stored in the knowledge base under findings/ so it is searchable by everyone. Post findings as you go, not only at the end.',
+        'Record a discrete finding, insight, or conclusion for the team: what you found, the evidence, and your confidence. Stored in the knowledge base under findings/ so it is searchable by everyone. In a shared conversation, post findings about the project as you go, not only at the end.',
       input: {
         title: z.string().describe('One-line statement of the finding'),
         summary: z.string().describe('The finding in a few sentences'),
         evidence: z.string().optional().describe('Supporting detail: data, quotes, links, reproduction steps'),
         confidence: z.enum(['low', 'medium', 'high']).optional().describe('How sure you are'),
         tags: z.array(z.string()).optional(),
-        project: z.string().optional(),
+        project: z.string().optional().describe("Optional; must be the session's project, which is the default"),
         task_id: z.string().optional().describe('Task this finding came from, if any'),
         sources: z.array(z.string()).optional().describe('URLs or document paths that back this up')
       }
     },
-    ({ title, summary, evidence, confidence, tags, project, task_id, sources }) => {
+    ({ title, summary, evidence, confidence, tags, project, task_id, sources }, session) => {
       const date = new Date().toISOString().slice(0, 10);
       const path = `findings/${date}-${slugify(title)}-${Math.random().toString(36).slice(2, 6)}.md`;
       const body = [
@@ -166,7 +175,16 @@ export function registerKnowledgeTools(server: McpServer, ctx: ToolContext): voi
       const doc = putDoc(
         ctx.db,
         ctx.user,
-        { path, title, content: body, kind: 'finding', tags, project, meta: { confidence: confidence ?? null, task_id: task_id ?? null, sources: sources ?? [] } },
+        {
+          path,
+          title,
+          content: body,
+          kind: 'finding',
+          tags,
+          project: sessionProject(session, project),
+          meta: { confidence: confidence ?? null, task_id: task_id ?? null, sources: sources ?? [] },
+          sessionId: session.id
+        },
         ctx.cfg.maxDocBytes
       );
       return { posted: true, path: doc.path, id: doc.id, project: doc.project };

@@ -16,6 +16,8 @@ export interface LogEntry {
   agent_id: string | null;
   agent_name: string | null;
   task_id: string | null;
+  /** Share session that wrote the line (null for system lines and pre-0.2 rows). */
+  session_id: string | null;
   ts: number;
 }
 
@@ -42,6 +44,7 @@ export interface AppendLogInput {
   agentId?: string;
   agentName?: string;
   taskId?: string;
+  sessionId?: string;
 }
 
 export function appendLog(db: DB, input: AppendLogInput): LogEntry {
@@ -53,8 +56,8 @@ export function appendLog(db: DB, input: AppendLogInput): LogEntry {
   const ts = now();
   const r = db
     .prepare(
-      `INSERT INTO logs (project, stream, level, message, data, user_id, user_name, agent_id, agent_name, task_id, ts)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO logs (project, stream, level, message, data, user_id, user_name, agent_id, agent_name, task_id, session_id, ts)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       normalizeProject(input.project),
@@ -67,6 +70,7 @@ export function appendLog(db: DB, input: AppendLogInput): LogEntry {
       input.agentId ?? null,
       input.agentName ?? null,
       input.taskId ?? null,
+      input.sessionId ?? null,
       ts
     );
   return getLog(db, Number(r.lastInsertRowid))!;

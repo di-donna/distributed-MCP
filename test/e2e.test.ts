@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
+import { rmSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { createServer as createNetServer } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { after, before, describe, test } from 'node:test';
+import Database from 'better-sqlite3';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { createApp } from '../src/app.js';
@@ -76,6 +80,11 @@ async function call<T = Record<string, unknown>>(client: Client, name: string, a
   }
 }
 
+/** Share a test client's "conversation" with a project; returns the session_id writes need. */
+async function share(client: Client, project: string, title = `e2e ${project}`): Promise<string> {
+  return (await call<{ session_id: string }>(client, 'session_start', { project, title })).session_id;
+}
+
 function pkce(): { verifier: string; challenge: string } {
   const verifier = randomBytes(32).toString('base64url');
   const challenge = createHash('sha256').update(verifier).digest('base64url');
@@ -119,7 +128,8 @@ describe('discovery and auth gate', () => {
     assert.equal((await fetch(`${base}/healthz`)).status, 200);
     const html = await (await fetch(`${base}/`)).text();
     assert.match(html, /Add custom connector/);
-    assert.ok(html.includes(`claude mcp add --transport http hive ${base}/mcp`), 'landing page shows the Claude Code command');
+    assert.ok(html.includes(`claude mcp add --transport http distributed-mcp ${base}/mcp`), 'landing page shows the Claude Code command');
+    assert.match(html, /Sharing is opt-in/);
   });
 });
 
@@ -151,7 +161,8 @@ describe('members, invites and the OAuth flow', () => {
     assert.ok(inv.share_message.includes(inv.invite_code), 'share_message carries the code');
     assert.ok(inv.share_message.includes(`${base}/mcp`), 'share_message carries the connector URL');
     assert.match(inv.share_message, /single use, expires \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC/);
-    assert.match(inv.share_message, /claude mcp add --transport http hive /);
+    assert.match(inv.share_message, /claude mcp add --transport http distributed-mcp /);
+    assert.match(inv.share_message, /Nothing is shared automatically/);
     inviteCode = inv.invite_code;
     await client.close();
   });
@@ -203,7 +214,7 @@ describe('members, invites and the OAuth flow', () => {
     assert.ok(keyMatch, 'joined page should show the new API key');
     danaKey = keyMatch![1]!;
     assert.ok(
-      html.includes(`claude mcp add --transport http hive ${base}/mcp --header &quot;Authorization: Bearer ${danaKey}&quot;`),
+      html.includes(`claude mcp add --transport http distributed-mcp ${base}/mcp --header &quot;Authorization: Bearer ${danaKey}&quot;`),
       'joined page shows the Claude Code command with the new key'
     );
     const hrefMatch = /href="(http:\/\/localhost:9999\/callback[^"]+)"/.exec(html);
@@ -321,8 +332,11 @@ describe('knowledge base', () => {
   test('put, search, versioning, history, optimistic locking, delete', async () => {
     const admin = await mcp(adminKey);
     const dana = await mcp((globalThis as Record<string, unknown>).__danaKey as string);
+    const adminS = await share(admin, 'alpha');
+    const danaS = await share(dana, 'alpha');
 
     const first = await call<{ version: number; path: string }>(admin, 'kb_put', {
+      session_id: adminS,
       path: '/research/rate-limits.md',
       title: 'API rate limits',
       content: 'The upstream API allows 60 requests per minute. Retry with exponential backoff.',
@@ -331,7 +345,7 @@ describe('knowledge base', () => {
     });
     assert.equal(first.version, 1);
     assert.equal(first.path, 'research/rate-limits.md');
-    await call(dana, 'kb_put', { path: 'research/tokenizer.md', content: 'Tokenizer benchmark: 12k docs/sec on one core.', kind: 'note', project: 'alpha' });
+    await call(dana, 'kb_put', { session_id: danaS, path: 'research/tokenizer.md', content: 'Tokenizer benchmark: 12k docs/sec on one core.', kind: 'note' });
 
     const hits = await call<Array<{ path: string; snippet: string }>>(dana, 'kb_search', { query: 'rate limit backoff' });
     assert.equal(hits.length, 1);
@@ -342,10 +356,11 @@ describe('knowledge base', () => {
     assert.equal((await call<unknown[]>(dana, 'kb_search', { query: 'tokenizer', kind: 'note' })).length, 1);
     assert.equal((await call<unknown[]>(dana, 'kb_search', { query: 'tokenizer', kind: 'doc' })).length, 0);
 
-    const v2 = await call<{ version: number }>(dana, 'kb_put', { path: 'research/rate-limits.md', content: 'Updated: limit is now 120/min.', expected_version: 1 });
+    const v2 = await call<{ version: number; project: string }>(dana, 'kb_put', { session_id: danaS, path: 'research/rate-limits.md', content: 'Updated: limit is now 120/min.', expected_version: 1 });
     assert.equal(v2.version, 2);
-    await assert.rejects(call(dana, 'kb_put', { path: 'research/rate-limits.md', content: 'stale write', expected_version: 1 }), /conflict/);
-    await assert.rejects(call(dana, 'kb_put', { path: 'research/rate-limits.md', content: 'x', if_absent: true }), /already exists/);
+    assert.equal(v2.project, 'alpha', 'an update without project keeps the session project instead of moving the doc to default');
+    await assert.rejects(call(dana, 'kb_put', { session_id: danaS, path: 'research/rate-limits.md', content: 'stale write', expected_version: 1 }), /conflict/);
+    await assert.rejects(call(dana, 'kb_put', { session_id: danaS, path: 'research/rate-limits.md', content: 'x', if_absent: true }), /already exists/);
 
     const latest = await call<{ content: string; version: number; updated_by_name: string }>(dana, 'kb_get', { path: 'research/rate-limits.md' });
     assert.equal(latest.version, 2);
@@ -360,13 +375,13 @@ describe('knowledge base', () => {
     assert.equal((await call<unknown[]>(dana, 'kb_search', { query: 'exponential' })).length, 0);
     assert.equal((await call<unknown[]>(dana, 'kb_search', { query: '120' })).length, 1);
 
-    const finding = await call<{ path: string }>(dana, 'finding_post', { title: 'Backoff works', summary: 'Backoff eliminated 429s.', confidence: 'high', project: 'alpha', tags: ['api'] });
+    const finding = await call<{ path: string }>(dana, 'finding_post', { session_id: danaS, title: 'Backoff works', summary: 'Backoff eliminated 429s.', confidence: 'high', project: 'alpha', tags: ['api'] });
     assert.match(finding.path, /^findings\/\d{4}-\d{2}-\d{2}-backoff-works/);
     assert.equal((await call<unknown[]>(admin, 'finding_list', { project: 'alpha' })).length, 1);
 
     // only author/admin may delete
-    await assert.rejects(call(dana, 'kb_delete', { path: 'research/rate-limits.md' }), /forbidden/);
-    await call(admin, 'kb_delete', { path: 'research/rate-limits.md' });
+    await assert.rejects(call(dana, 'kb_delete', { session_id: danaS, path: 'research/rate-limits.md' }), /forbidden/);
+    await call(admin, 'kb_delete', { session_id: adminS, path: 'research/rate-limits.md' });
     await assert.rejects(call(dana, 'kb_get', { path: 'research/rate-limits.md' }), /not_found/);
 
     // resources expose documents
@@ -386,20 +401,22 @@ describe('distributed task queue', () => {
   test('create, capability gating, dependencies, atomic claim, complete, lease expiry, failure', async () => {
     const admin = await mcp(adminKey);
     const dana = await mcp((globalThis as Record<string, unknown>).__danaKey as string);
+    const adminS = await share(admin, 'beta');
+    const danaS = await share(dana, 'beta');
 
-    const a = await call<{ id: string }>(admin, 'task_create', { title: 'Shard 1', description: 'process shard 1', project: 'beta', requires: ['python'], inputs: { shard: 1 } });
-    const b = await call<{ id: string; blocked: boolean }>(admin, 'task_create', { title: 'Merge', project: 'beta', depends_on: [a.id], priority: 10 });
+    const a = await call<{ id: string }>(admin, 'task_create', { session_id: adminS, title: 'Shard 1', description: 'process shard 1', project: 'beta', requires: ['python'], inputs: { shard: 1 } });
+    const b = await call<{ id: string; blocked: boolean }>(admin, 'task_create', { session_id: adminS, title: 'Merge', depends_on: [a.id], priority: 10 });
     assert.equal(b.blocked, true);
-    await assert.rejects(call(admin, 'task_create', { title: 'bad', depends_on: ['task_nope'] }), /not_found/);
-    const batch = await call<Array<{ id: string }>>(admin, 'task_create_batch', { tasks: [{ title: 'Shard 2', project: 'beta', requires: ['python'] }, { title: 'Shard 3', project: 'beta', requires: ['python'] }] });
+    await assert.rejects(call(admin, 'task_create', { session_id: adminS, title: 'bad', depends_on: ['task_nope'] }), /not_found/);
+    const batch = await call<Array<{ id: string }>>(admin, 'task_create_batch', { session_id: adminS, tasks: [{ title: 'Shard 2', requires: ['python'] }, { title: 'Shard 3', project: 'beta', requires: ['python'] }] });
     assert.equal(batch.length, 2);
 
     // admin's default agent has no capabilities → nothing claimable (B is blocked)
-    const none = await call<{ claimed: null }>(admin, 'task_claim', { project: 'beta' });
+    const none = await call<{ claimed: null }>(admin, 'task_claim', { session_id: adminS });
     assert.equal(none.claimed, null);
 
     const agent = await call<{ id: string }>(dana, 'agent_register', { name: 'py-worker', capabilities: ['python', 'Research'] });
-    const claim1 = await call<{ claimed: { id: string; status: string; attempts: number; claimed_by_name: string } }>(dana, 'task_claim', { agent_id: agent.id, project: 'beta' });
+    const claim1 = await call<{ claimed: { id: string; status: string; attempts: number; claimed_by_name: string } }>(dana, 'task_claim', { session_id: danaS, agent_id: agent.id, project: 'beta' });
     assert.equal(claim1.claimed.id, a.id);
     assert.equal(claim1.claimed.status, 'claimed');
     assert.equal(claim1.claimed.attempts, 1);
@@ -407,17 +424,23 @@ describe('distributed task queue', () => {
 
     // a second claim by a different agent cannot get the same task
     const agent2 = await call<{ id: string }>(dana, 'agent_register', { name: 'py-worker-2', capabilities: ['python'] });
-    const claim2 = await call<{ claimed: { id: string } }>(dana, 'task_claim', { agent_id: agent2.id, project: 'beta' });
+    const claim2 = await call<{ claimed: { id: string } }>(dana, 'task_claim', { session_id: danaS, agent_id: agent2.id });
     assert.notEqual(claim2.claimed.id, a.id);
     assert.ok(batch.some((t) => t.id === claim2.claimed.id));
-    await call(dana, 'task_release', { task_id: claim2.claimed.id, agent_id: agent2.id, note: 'busy' });
+    await call(dana, 'task_release', { session_id: danaS, task_id: claim2.claimed.id, agent_id: agent2.id, note: 'busy' });
 
     // only the holder may heartbeat/complete
-    await assert.rejects(call(admin, 'task_complete', { task_id: a.id, result: 'nope' }), /held by/);
-    const hb = await call<{ progress: string; lease_expires_at: number }>(dana, 'task_heartbeat', { task_id: a.id, agent_id: agent.id, progress: 'halfway' });
+    await assert.rejects(call(admin, 'task_complete', { session_id: adminS, task_id: a.id, result: 'nope' }), /held by/);
+    const hb = await call<{ progress: string; lease_expires_at: number }>(dana, 'task_heartbeat', { session_id: danaS, task_id: a.id, agent_id: agent.id, progress: 'halfway' });
     assert.equal(hb.progress, 'halfway');
 
-    const done = await call<{ status: string; result_kb_path: string }>(dana, 'task_complete', { task_id: a.id, agent_id: agent.id, result: '# Shard 1\n\nrows=1000', kb_path: 'results/beta/shard-1.md' });
+    const done = await call<{ status: string; result_kb_path: string }>(dana, 'task_complete', {
+      session_id: danaS,
+      task_id: a.id,
+      agent_id: agent.id,
+      result: '# Shard 1\n\nrows=1000',
+      kb_path: 'results/beta/shard-1.md'
+    });
     assert.equal(done.status, 'done');
     assert.equal(done.result_kb_path, 'results/beta/shard-1.md');
     const doc = await call<{ kind: string; meta: { task_id: string } }>(dana, 'kb_get', { path: 'results/beta/shard-1.md' });
@@ -425,21 +448,21 @@ describe('distributed task queue', () => {
     assert.equal(doc.meta.task_id, a.id);
 
     // dependency satisfied → merge task is now claimable by anyone, highest priority first
-    const mergeClaim = await call<{ claimed: { id: string } }>(admin, 'task_claim', { project: 'beta' });
+    const mergeClaim = await call<{ claimed: { id: string } }>(admin, 'task_claim', { session_id: adminS });
     assert.equal(mergeClaim.claimed.id, b.id);
-    await call(admin, 'task_fail', { task_id: b.id, error: 'merge tool crashed', retry: true });
+    await call(admin, 'task_fail', { session_id: adminS, task_id: b.id, error: 'merge tool crashed', retry: true });
     assert.equal((await call<{ status: string; attempts: number }>(admin, 'task_get', { task_id: b.id })).status, 'open');
 
     // lease expiry returns a task to the pool and counts the attempt
-    const again = await call<{ claimed: { id: string; attempts: number } }>(admin, 'task_claim', { task_id: b.id });
+    const again = await call<{ claimed: { id: string; attempts: number } }>(admin, 'task_claim', { session_id: adminS, task_id: b.id });
     assert.equal(again.claimed.attempts, 2);
     db.prepare('UPDATE tasks SET lease_expires_at = ? WHERE id = ?').run(Math.floor(Date.now() / 1000) - 5, b.id);
     const after = await call<{ status: string; claimed_by: string | null }>(admin, 'task_get', { task_id: b.id });
     const expiredList = await call<Array<{ id: string; status: string }>>(admin, 'task_list', { project: 'beta', status: 'open' });
     assert.ok(expiredList.some((t) => t.id === b.id), `expected ${b.id} to be open again, got ${JSON.stringify(after)}`);
-    const third = await call<{ claimed: { attempts: number } }>(dana, 'task_claim', { task_id: b.id, agent_id: agent.id });
+    const third = await call<{ claimed: { attempts: number } }>(dana, 'task_claim', { session_id: danaS, task_id: b.id, agent_id: agent.id });
     assert.equal(third.claimed.attempts, 3);
-    const failed = await call<{ status: string }>(dana, 'task_fail', { task_id: b.id, agent_id: agent.id, error: 'still broken', retry: true });
+    const failed = await call<{ status: string }>(dana, 'task_fail', { session_id: danaS, task_id: b.id, agent_id: agent.id, error: 'still broken', retry: true });
     assert.equal(failed.status, 'failed', 'max_attempts exhausted → failed');
 
     const status = await call<{ counts: Record<string, number>; failed: unknown[]; recent_task_log: unknown[] }>(admin, 'project_status', { project: 'beta' });
@@ -448,9 +471,9 @@ describe('distributed task queue', () => {
     assert.equal(status.counts.open, 2);
     assert.ok(status.recent_task_log.length >= 5);
 
-    const cancelled = await call<{ status: string }>(admin, 'task_cancel', { task_id: batch[1]!.id, reason: 'no longer needed' });
+    const cancelled = await call<{ status: string }>(admin, 'task_cancel', { session_id: adminS, task_id: batch[1]!.id, reason: 'no longer needed' });
     assert.equal(cancelled.status, 'cancelled');
-    await assert.rejects(call(dana, 'task_cancel', { task_id: batch[0]!.id }), /forbidden/);
+    await assert.rejects(call(dana, 'task_cancel', { session_id: danaS, task_id: batch[0]!.id }), /forbidden/);
 
     const board = await dana.readResource({ uri: 'hive://projects/beta/board' });
     assert.match((board.contents[0] as { text: string }).text, /# Project beta/);
@@ -464,9 +487,11 @@ describe('logs, messages, prompts', () => {
   test('log streams and chat', async () => {
     const admin = await mcp(adminKey);
     const dana = await mcp((globalThis as Record<string, unknown>).__danaKey as string);
+    const adminS = await share(admin, 'beta');
+    const danaS = await share(dana, 'beta');
 
-    const l1 = await call<{ id: number }>(dana, 'log_append', { stream: 'crawler', message: 'fetched 100 pages', data: { pages: 100 }, project: 'beta' });
-    const l2 = await call<{ id: number; level: string }>(dana, 'log_append', { stream: 'crawler', message: 'rate limited by upstream', level: 'warn', project: 'beta' });
+    const l1 = await call<{ id: number }>(dana, 'log_append', { session_id: danaS, stream: 'crawler', message: 'fetched 100 pages', data: { pages: 100 }, project: 'beta' });
+    const l2 = await call<{ id: number; level: string }>(dana, 'log_append', { session_id: danaS, stream: 'crawler', message: 'rate limited by upstream', level: 'warn' });
     assert.ok(l2.id > l1.id);
     const tail = await call<Array<{ id: number; message: string; data: unknown }>>(admin, 'log_tail', { stream: 'crawler' });
     assert.deepEqual(tail.map((l) => l.id), [l1.id, l2.id]);
@@ -477,12 +502,12 @@ describe('logs, messages, prompts', () => {
     assert.equal(warns.length, 1);
     assert.equal((await call<unknown[]>(admin, 'log_search', { query: 'rate limited' })).length, 1);
     assert.ok((await call<Array<{ stream: string }>>(admin, 'log_streams', {})).some((s) => s.stream === 'crawler'));
-    await assert.rejects(call(admin, 'log_append', { message: 'x', level: 'loud' }), /invalid/i);
+    await assert.rejects(call(admin, 'log_append', { session_id: adminS, message: 'x', level: 'loud' }), /invalid/i);
 
     const me = await call<{ agents: Array<{ id: string; name: string }> }>(dana, 'hive_whoami');
     const worker = me.agents.find((a) => a.name === 'py-worker')!;
-    await call(admin, 'msg_post', { channel: 'beta', body: 'tasks are up' });
-    await call(admin, 'msg_post', { body: 'psst, take shard 3', to_agent: worker.id });
+    await call(admin, 'msg_post', { session_id: adminS, channel: 'beta', body: 'tasks are up' });
+    await call(admin, 'msg_post', { session_id: adminS, body: 'psst, take shard 3', to_agent: worker.id });
     const forWorker = await call<Array<{ body: string }>>(dana, 'msg_read', { agent_id: worker.id });
     assert.deepEqual(forWorker.map((m) => m.body), ['tasks are up', 'psst, take shard 3']);
     const forOther = await call<Array<{ body: string }>>(dana, 'msg_read', {});
@@ -495,11 +520,103 @@ describe('logs, messages, prompts', () => {
     const prompts = await dana.listPrompts();
     assert.deepEqual(prompts.prompts.map((p) => p.name).sort(), ['hive_briefing', 'hive_coordinator', 'hive_worker']);
     const worked = await dana.getPrompt({ name: 'hive_worker', arguments: { project: 'beta', agent_name: 'w1', capabilities: 'python,browser' } });
-    assert.match((worked.messages[0]!.content as { text: string }).text, /"python", "browser"/);
+    const workerText = (worked.messages[0]!.content as { text: string }).text;
+    assert.match(workerText, /"python", "browser"/);
+    assert.match(workerText, /session_start with project "beta"/);
+    const coord = await dana.getPrompt({ name: 'hive_coordinator', arguments: { project: 'beta', goal: 'ship it' } });
+    assert.match((coord.messages[0]!.content as { text: string }).text, /session_start with project "beta"/);
 
     const tools = await dana.listTools();
-    assert.ok(tools.tools.length >= 35, `expected a full toolset, got ${tools.tools.length}`);
+    const names = tools.tools.map((t) => t.name);
+    assert.equal(names.length, 40, `expected the full toolset, got ${names.length}`);
+    assert.ok(['session_start', 'session_end', 'session_list'].every((n) => names.includes(n)));
+    const kbPut = tools.tools.find((t) => t.name === 'kb_put')!;
+    assert.ok((kbPut.inputSchema.required ?? []).includes('session_id'), 'write tools require session_id');
     await admin.close();
     await dana.close();
+  });
+});
+
+describe('share sessions', () => {
+  test('writes need a session of this member, confined to its project, and are traceable', async () => {
+    const admin = await mcp(adminKey);
+    const dana = await mcp((globalThis as Record<string, unknown>).__danaKey as string);
+
+    // a conversation that was never shared cannot write
+    await assert.rejects(call(dana, 'log_append', { message: 'private chat leaking' }), /session_id/);
+    await assert.rejects(call(dana, 'kb_put', { session_id: 'ses_madeup', path: 'x.md', content: 'x' }), /no_session/);
+    const adminG = await share(admin, 'gamma', 'admin planning gamma');
+    await assert.rejects(call(dana, 'kb_put', { session_id: adminG, path: 'x.md', content: 'x' }), /no_session/, "another member's session id does not work");
+
+    const g = await share(dana, 'gamma', 'Dana researching gamma');
+    // only the session's project
+    await assert.rejects(call(dana, 'kb_put', { session_id: g, path: 'gamma/a.md', content: 'x', project: 'alpha' }), /wrong_project/);
+    await assert.rejects(call(dana, 'kb_put', { session_id: g, path: 'research/tokenizer.md', content: 'overwrite alpha doc' }), /wrong_project/);
+    await assert.rejects(call(dana, 'kb_delete', { session_id: g, path: 'research/tokenizer.md' }), /wrong_project/);
+    await assert.rejects(call(dana, 'msg_post', { session_id: g, channel: 'beta', body: 'wrong room' }), /wrong_project/);
+    await assert.rejects(call(dana, 'log_append', { session_id: g, message: 'x', project: 'beta' }), /wrong_project/);
+    const betaOpen = await call<Array<{ id: string }>>(dana, 'task_list', { project: 'beta', status: 'open' });
+    await assert.rejects(call(dana, 'task_claim', { session_id: g, task_id: betaOpen[0]!.id }), /wrong_project/);
+    await assert.rejects(call(dana, 'task_update', { session_id: g, task_id: betaOpen[0]!.id, title: 'hijack' }), /wrong_project/);
+    await assert.rejects(call(dana, 'task_create', { session_id: g, title: 'cross', depends_on: [betaOpen[0]!.id] }), /wrong_project/);
+
+    // writes inside the project work and record the session
+    const doc = await call<{ project: string }>(dana, 'kb_put', { session_id: g, path: 'gamma/notes.md', content: 'gamma notes', meta: { shared_from_session: 'spoofed' } });
+    assert.equal(doc.project, 'gamma');
+    const full = await call<{ meta: Record<string, unknown> }>(dana, 'kb_get', { path: 'gamma/notes.md' });
+    assert.equal(full.meta.shared_from_session, g, 'server sets provenance and ignores a spoofed value');
+    const line = await call<{ session_id: string; project: string }>(dana, 'log_append', { session_id: g, message: 'started gamma' });
+    assert.equal(line.session_id, g);
+    assert.equal(line.project, 'gamma');
+    const msg = await call<{ session_id: string; channel: string }>(dana, 'msg_post', { session_id: g, body: 'hello gamma' });
+    assert.equal(msg.channel, 'gamma');
+    assert.equal(msg.session_id, g);
+    const task = await call<{ id: string; session_id: string; project: string }>(dana, 'task_create', { session_id: g, title: 'Gamma task' });
+    assert.equal(task.project, 'gamma');
+    assert.equal(task.session_id, g);
+    const adminBeta = await share(admin, 'beta', 'admin on beta');
+    await assert.rejects(call(admin, 'task_cancel', { session_id: adminBeta, task_id: task.id }), /wrong_project/, 'even an admin cannot reach into another project from a session');
+
+    const mine = await call<Array<{ id: string; active: boolean; contributions: Record<string, number> }>>(dana, 'session_list', { project: 'gamma' });
+    const listed = mine.find((s) => s.id === g)!;
+    assert.equal(listed.active, true);
+    assert.deepEqual(listed.contributions, { docs: 1, logs: 1, messages: 1, tasks: 1 });
+    const status = await call<{ active_sessions: Array<{ member: string; title: string }> }>(admin, 'project_status', { project: 'gamma' });
+    assert.ok(status.active_sessions.some((s) => s.member === 'Dana' && s.title === 'Dana researching gamma'));
+    const everyone = await call<Array<{ user_name: string }>>(dana, 'session_list', { project: 'gamma', all: true });
+    assert.ok(everyone.some((s) => s.user_name === 'root'));
+
+    // idle sessions expire; ended sessions refuse writes
+    db.prepare('UPDATE share_sessions SET last_used_at = ? WHERE id = ?').run(Math.floor(Date.now() / 1000) - (cfg.sessionIdleHours + 1) * 3600, adminG);
+    await assert.rejects(call(admin, 'log_append', { session_id: adminG, message: 'stale' }), /session_expired/);
+    const ended = await call<{ ended: boolean }>(dana, 'session_end', { session_id: g });
+    assert.equal(ended.ended, true);
+    await assert.rejects(call(dana, 'log_append', { session_id: g, message: 'after end' }), /session_ended/);
+    assert.equal((await call<Array<{ id: string }>>(dana, 'session_list', { project: 'gamma', active_only: true })).length, 0);
+
+    await admin.close();
+    await dana.close();
+  });
+
+  test('opening a 0.1 database adds the session columns', () => {
+    const file = join(tmpdir(), `hive-migrate-${randomBytes(4).toString('hex')}.db`);
+    try {
+      openDb(file).close();
+      const raw = new Database(file);
+      for (const t of ['logs', 'messages', 'tasks']) {
+        raw.exec(`DROP INDEX IF EXISTS idx_${t}_session; ALTER TABLE ${t} DROP COLUMN session_id;`);
+      }
+      raw.prepare("INSERT INTO logs (project, stream, level, message, ts) VALUES ('old', 'general', 'info', 'from 0.1', 1)").run();
+      raw.close();
+      const migrated = openDb(file);
+      for (const t of ['logs', 'messages', 'tasks']) {
+        const cols = (migrated.prepare(`PRAGMA table_info(${t})`).all() as Array<{ name: string }>).map((c) => c.name);
+        assert.ok(cols.includes('session_id'), `${t}.session_id added`);
+      }
+      assert.equal((migrated.prepare("SELECT message, session_id FROM logs WHERE project = 'old'").get() as { message: string; session_id: null }).session_id, null);
+      migrated.close();
+    } finally {
+      for (const suffix of ['', '-wal', '-shm']) rmSync(file + suffix, { force: true });
+    }
   });
 });

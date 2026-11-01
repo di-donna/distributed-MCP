@@ -22,6 +22,8 @@ export interface Config {
   authCodeTtlSec: number;
   /** Max size of a single knowledge-base document in bytes. */
   maxDocBytes: number;
+  /** A share session that has not been used for this many hours stops accepting writes. */
+  sessionIdleHours: number;
   /** If true, the /mcp endpoint answers with plain JSON instead of SSE streams. */
   jsonResponses: boolean;
 }
@@ -66,7 +68,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     host: env.HOST || '0.0.0.0',
     publicUrl,
     dbPath: env.DB_PATH || './data/hive.db',
-    teamName: env.HIVE_TEAM_NAME || 'Hive',
+    teamName: env.HIVE_TEAM_NAME || 'Distributed MCP',
     adminName: env.HIVE_ADMIN_NAME || 'admin',
     adminKey,
     cimdAllowedHosts,
@@ -75,8 +77,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     refreshTokenTtlSec: envInt(env, 'REFRESH_TOKEN_TTL_SEC', 90 * 24 * 3600),
     authCodeTtlSec: envInt(env, 'AUTH_CODE_TTL_SEC', 600),
     maxDocBytes: envInt(env, 'MAX_DOC_BYTES', 512 * 1024),
+    sessionIdleHours: envInt(env, 'SESSION_IDLE_HOURS', 72),
     jsonResponses: envBool(env, 'MCP_JSON_RESPONSES', true)
   };
 }
 
-export const VERSION = '0.1.0';
+export const VERSION = '0.2.0';

@@ -3,14 +3,14 @@
 #   fly secrets set HIVE_ADMIN_KEY=hv_key_<long-random-string>
 #   fly deploy
 # The app URL becomes https://<app>.fly.dev ; set PUBLIC_URL below accordingly.
-app = "hive-mcp"
+app = "distributed-mcp"
 primary_region = "iad"
 
 [build]
 
 [env]
-  PUBLIC_URL = "https://hive-mcp.fly.dev"
-  HIVE_TEAM_NAME = "Hive"
+  PUBLIC_URL = "https://distributed-mcp.fly.dev"
+  HIVE_TEAM_NAME = "Distributed MCP"
   TRUST_PROXY = "1"
   DB_PATH = "/data/hive.db"
   PORT = "8787"

@@ -216,7 +216,35 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel, id);
 CREATE INDEX IF NOT EXISTS idx_messages_to ON messages(to_agent, id);
+
+-- A conversation the member explicitly shared with one project; its id is required for every write.
+CREATE TABLE IF NOT EXISTS share_sessions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  project TEXT NOT NULL,
+  title TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  last_used_at INTEGER NOT NULL,
+  ended_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_share_sessions_project ON share_sessions(project, last_used_at);
+CREATE INDEX IF NOT EXISTS idx_share_sessions_user ON share_sessions(user_id, last_used_at);
 `;
+
+/** Columns added after the first release; applied to existing databases on open. */
+const ADDED_COLUMNS: Array<{ table: string; column: string; type: string; index?: string }> = [
+  { table: 'logs', column: 'session_id', type: 'TEXT', index: 'CREATE INDEX IF NOT EXISTS idx_logs_session ON logs(session_id)' },
+  { table: 'messages', column: 'session_id', type: 'TEXT', index: 'CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id)' },
+  { table: 'tasks', column: 'session_id', type: 'TEXT', index: 'CREATE INDEX IF NOT EXISTS idx_tasks_session ON tasks(session_id)' }
+];
+
+function migrate(db: DB): void {
+  for (const { table, column, type, index } of ADDED_COLUMNS) {
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+    if (index) db.exec(index);
+  }
+}
 
 export function openDb(path: string): DB {
   if (path !== ':memory:') {
@@ -228,5 +256,6 @@ export function openDb(path: string): DB {
   db.pragma('busy_timeout = 5000');
   db.pragma('synchronous = NORMAL');
   db.exec(SCHEMA);
+  migrate(db);
   return db;
 }
