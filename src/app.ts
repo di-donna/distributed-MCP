@@ -41,14 +41,19 @@ export function createApp(cfg: Config, db: DB, deps: AppDeps = {}): HiveApp {
   if (cfg.trustProxy) app.set('trust proxy', 1);
 
   // ----- discovery documents -----
+  // The issuer must be byte-identical everywhere (RFC 8414 §3.3, RFC 9207): the origin these documents are
+  // published under, with no trailing slash, which is also the `iss` returned with authorization codes.
+  // `URL.href` would add a slash, so use the configured string.
+  const issuerId = cfg.publicUrl;
   const asMetadata: OAuthMetadata = {
     ...createOAuthMetadata({ provider, issuerUrl: issuer }),
+    issuer: issuerId,
     client_id_metadata_document_supported: true,
     authorization_response_iss_parameter_supported: true
   };
   const prMetadata: OAuthProtectedResourceMetadata = {
     resource: mcpUrl.href,
-    authorization_servers: [issuer.href],
+    authorization_servers: [issuerId],
     resource_name: `${cfg.teamName} shared workspace`,
     bearer_methods_supported: ['header'],
     resource_documentation: issuer.href

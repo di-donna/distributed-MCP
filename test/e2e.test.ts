@@ -117,8 +117,12 @@ describe('discovery and auth gate', () => {
   test('protected resource + authorization server metadata are served', async () => {
     const pr = (await (await fetch(`${base}/.well-known/oauth-protected-resource/mcp`)).json()) as Record<string, unknown>;
     assert.equal(pr.resource, `${base}/mcp`);
-    assert.deepEqual(pr.authorization_servers, [`${base}/`]);
+    // One issuer string everywhere (RFC 8414 §3.3 / RFC 9207): Claude refuses to connect on any mismatch,
+    // including a trailing slash. The iss returned with the code is checked in the OAuth flow test below.
+    assert.deepEqual(pr.authorization_servers, [base]);
     const as = (await (await fetch(`${base}/.well-known/oauth-authorization-server`)).json()) as Record<string, unknown>;
+    assert.equal(as.issuer, base, 'issuer is exactly the origin the metadata is published under');
+    assert.equal(`${as.issuer}/.well-known/oauth-authorization-server`, `${base}/.well-known/oauth-authorization-server`);
     assert.equal(as.client_id_metadata_document_supported, true);
     assert.equal(as.registration_endpoint, `${base}/register`);
     assert.deepEqual(as.code_challenge_methods_supported, ['S256']);
@@ -287,6 +291,8 @@ describe('members, invites and the OAuth flow', () => {
     const loc = new URL(login.headers.get('location')!);
     assert.equal(`${loc.origin}${loc.pathname}`, CIMD_REDIRECT);
     assert.equal(loc.searchParams.get('state'), 's1');
+    const advertised = ((await (await fetch(`${base}/.well-known/oauth-authorization-server`)).json()) as { issuer: string }).issuer;
+    assert.equal(loc.searchParams.get('iss'), advertised, 'iss returned to Claude must equal the advertised issuer');
     const tok = await form('/token', { grant_type: 'authorization_code', code: loc.searchParams.get('code')!, code_verifier: verifier, client_id: CIMD_CLIENT_ID, redirect_uri: CIMD_REDIRECT });
     assert.equal(tok.status, 200);
     const { access_token } = (await tok.json()) as { access_token: string };
